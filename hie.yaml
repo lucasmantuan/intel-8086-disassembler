@@ -1,6 +1,8 @@
 cradle:
-  stack:
-    - path: "./Setup.hs"
-      component: "sim8086:exe:sim8086"
+  multi:
     - path: "./src"
-      component: "sim8086:exe:sim8086"
+      config: { cradle: { stack: { component: "sim8086:exe:sim8086" } } }
+    - path: "./Setup.hs"
+      config: { cradle: { stack: { component: "sim8086:exe:sim8086" } } }
+    - path: "./"
+      config: { cradle: { stack: { component: "sim8086:exe:sim8086" } } }

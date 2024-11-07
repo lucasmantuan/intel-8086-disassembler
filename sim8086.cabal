@@ -7,9 +7,9 @@ version:             0.1.0.0
 homepage:            https://github.com/githubuser/sim8086#readme
 license:             BSD-3-Clause
 license-file:        license
-author:              Author name here
+author:              Lucas Mantuan
 maintainer:          example@example.com
-copyright:           2024 Author name here
+copyright:           2024 Lucas Mantuan
 category:            Web
 build-type:          Simple
 extra-source-files:  readme.md
@@ -22,7 +22,7 @@ executable sim8086
   hs-source-dirs:      src
   main-is:             Main.hs
   default-language:    Haskell2010
-  build-depends:       base >= 4.7 && < 5, bytestring, containers, string-interpolate
+  build-depends:       Cabal >= 3.10.3, base >= 4.7 && < 5, bytestring, containers, string-interpolate
   ghc-options:         -Wall
                        -Wcompat
                        -Widentities
