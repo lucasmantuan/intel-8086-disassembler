@@ -20,7 +20,7 @@ import System.Environment (getArgs)
 data Instruction = Instruction
     { mnemonic :: String,
       opcodePattern :: [Maybe Int],
-      operandHandler :: [[Int]] -> [(String, String, [Int])] -> (String, String, Int)
+      operandHandler :: [[Int]] -> [(String, String, [Int])] -> [(String, [Int])] -> (String, String, Int)
     }
 
 
@@ -36,16 +36,8 @@ lookupRegisterPair :: (Eq v) => v -> [(k1, k2, v)] -> Maybe (k1, k2)
 lookupRegisterPair searchValue searchTuple = listToMaybe [(k1, k2) | (k1, k2, v) <- searchTuple, v == searchValue]
 
 
-lookupAddressMode :: [Int] -> String
-lookupAddressMode [0, 0, 0] = "bx + si"
-lookupAddressMode [0, 0, 1] = "bx + di"
-lookupAddressMode [0, 1, 0] = "bp + si"
-lookupAddressMode [0, 1, 1] = "bp + di"
-lookupAddressMode [1, 0, 0] = "si"
-lookupAddressMode [1, 0, 1] = "di"
-lookupAddressMode [1, 1, 0] = "bp"
-lookupAddressMode [1, 1, 1] = "bx"
-lookupAddressMode _ = "err"
+lookupAddressMode :: [(String, [Int])] -> [Int] -> String
+lookupAddressMode addressModes bits = maybe "err" fst (find (\(_, b) -> b == bits) addressModes)
 
 
 matchInstruction :: [Int] -> Instruction -> Bool
@@ -56,8 +48,22 @@ matchInstruction bits (Instruction _ pattern _) =
         matchBit _ Nothing = True
 
 
-handleMovInstruction :: [[Int]] -> [(String, String, [Int])] -> (String, String, Int)
-handleMovInstruction bytes registers =
+convertBitsToByte :: [Int] -> Int
+convertBitsToByte = foldl (\acc b -> acc * 2 + b) 0
+
+
+convertDisplacement :: [Int] -> Int
+convertDisplacement bits =
+    let
+        value = foldl (\acc b -> acc * 2 + b) 0 bits
+    in
+        if length bits == 8 && testBit value 7
+            then value - 256
+            else value
+
+
+handleMovInstruction :: [[Int]] -> [(String, String, [Int])] -> [(String, [Int])] -> (String, String, Int)
+handleMovInstruction bytes registers addressModes =
     let
         firstByte = bytes !! 0
         d = firstByte !! 6
@@ -67,10 +73,8 @@ handleMovInstruction bytes registers =
         regField = take 3 (drop 2 secondByte)
         rmField = take 3 (drop 5 secondByte)
 
-        -- Determines the register name based on the bit w
         regName regBits = maybe "err" (if w == 0 then fst else snd) (lookupRegisterPair regBits registers)
 
-        -- Handle register-to-register mode when modField is [1,1]
         (source, destination, instrLength) =
             if modField == [1, 1]
                 then
@@ -82,23 +86,20 @@ handleMovInstruction bytes registers =
                             then (rmOperand, regOperand, 2)
                             else (regOperand, rmOperand, 2)
                 else
-                    -- Handle memory addressing modes
                     let
-                        baseAddress = lookupAddressMode rmField
+                        baseAddress = lookupAddressMode addressModes rmField
 
                         (displacementBits, instrLen) = case modField of
-                            [0, 1] -> (bytes !! 2, 3) -- 8-bit displacement
-                            [1, 0] -> (bytes !! 2 ++ bytes !! 3, 4) -- 16-bit displacement
-                            _ -> ([], 2) -- No displacement
+                            [0, 1] -> (bytes !! 2, 3)
+                            [1, 0] -> (bytes !! 2 ++ bytes !! 3, 4)
+                            _ -> ([], 2)
                         displacement = if null displacementBits then 0 else convertDisplacement displacementBits
 
-                        -- Build the displacement string
                         displacementStr
                             | displacement > 0 = " + " ++ show displacement
                             | displacement < 0 = " - " ++ show (abs displacement)
                             | otherwise = ""
 
-                        -- Constructs the final address with displacement inside the brackets
                         address = "[" ++ baseAddress ++ displacementStr ++ "]"
 
                         regOperand = regName regField
@@ -110,8 +111,9 @@ handleMovInstruction bytes registers =
         (source, destination, instrLength)
 
 
-handleMovImmediateInstruction :: [[Int]] -> [(String, String, [Int])] -> (String, String, Int)
-handleMovImmediateInstruction bytes registers =
+handleMovImmediateInstruction
+    :: [[Int]] -> [(String, String, [Int])] -> [(String, [Int])] -> (String, String, Int)
+handleMovImmediateInstruction bytes registers _addressModes =
     let
         firstByte = bytes !! 0
         w = firstByte !! 4 -- Bit `w` de largura
@@ -129,10 +131,10 @@ handleMovImmediateInstruction bytes registers =
         (regName, immediateValue, instrLength)
 
 
--- Atualização da função processInstructions
-processInstructions :: [[Int]] -> [Instruction] -> [(String, String, [Int])] -> FilePath -> IO ()
-processInstructions [] _ _ _ = return ()
-processInstructions bytes instructions registers filePath = do
+processInstructions
+    :: [[Int]] -> [Instruction] -> [(String, String, [Int])] -> [(String, [Int])] -> FilePath -> IO ()
+processInstructions [] _ _ _ _ = return ()
+processInstructions bytes instructions registers addressModes filePath = do
     let
         firstByte = bytes !! 0
     let
@@ -140,28 +142,14 @@ processInstructions bytes instructions registers filePath = do
     case matchedInstruction of
         Just instr -> do
             let
-                (destination, source, instrLength) = operandHandler instr bytes registers
+                (destination, source, instrLength) = operandHandler instr bytes registers addressModes
             let
                 disassembled = mnemonic instr ++ " " ++ destination ++ ", " ++ source
             appendFile filePath (disassembled ++ "\n")
-            processInstructions (drop instrLength bytes) instructions registers filePath
+            processInstructions (drop instrLength bytes) instructions registers addressModes filePath
         Nothing -> do
             appendFile filePath "Unknown Instruction\n"
-            processInstructions (tail bytes) instructions registers filePath
-
-
-convertBitsToByte :: [Int] -> Int
-convertBitsToByte = foldl (\acc b -> acc * 2 + b) 0
-
-
-convertDisplacement :: [Int] -> Int
-convertDisplacement bits =
-    let
-        value = foldl (\acc b -> acc * 2 + b) 0 bits
-    in
-        if length bits == 8 && testBit value 7 -- Verifica se é um deslocamento de 8 bits negativo
-            then value - 256
-            else value
+            processInstructions (tail bytes) instructions registers addressModes filePath
 
 
 main :: IO ()
@@ -197,8 +185,20 @@ main = do
                     ]
 
             let
+                address =
+                    [ ("bx + si", [0, 0, 0] :: [Int]),
+                      ("bx + di", [0, 0, 1] :: [Int]),
+                      ("bp + si", [0, 1, 0] :: [Int]),
+                      ("bp + di", [0, 1, 1] :: [Int]),
+                      ("si", [1, 0, 0] :: [Int]),
+                      ("di", [1, 0, 1] :: [Int]),
+                      ("bp", [1, 1, 0] :: [Int]),
+                      ("bx", [1, 1, 1] :: [Int])
+                    ]
+
+            let
                 bitMatrix = convertBytesToBitMatrix contents
 
             writeFile outputFile "bits 16\n\n"
 
-            processInstructions bitMatrix instructions registers outputFile
+            processInstructions bitMatrix instructions registers address outputFile
