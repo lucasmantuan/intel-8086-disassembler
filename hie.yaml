@@ -1,0 +1,6 @@
+cradle:
+  stack:
+    - path: "./Setup.hs"
+      component: "sim8086:exe:sim8086"
+    - path: "./src"
+      component: "sim8086:exe:sim8086"
