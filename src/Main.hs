@@ -17,139 +17,182 @@ import Data.Word (Word8)
 import System.Environment (getArgs)
 
 
+-- | Define o tipo de dados 'Instruction', que representa uma instrução de montagem.
 data Instruction = Instruction
     { mnemonic :: String,
-      opcodePattern :: [Maybe Int],
-      operandHandler :: [[Int]] -> [(String, String, [Int])] -> [(String, [Int])] -> (String, String, Int)
+      opcode :: [Maybe Int],
+      operand :: [[Int]] -> [(String, String, [Int])] -> [(String, [Int])] -> (String, String, Int)
     }
 
 
+-- | Converte uma lista de bits em um valor inteiro correspondente.
+convertBitsToByte :: [Int] -> Int
+convertBitsToByte = foldl (\acc bit -> acc * 2 + bit) 0
+
+
+-- | Converte um byte (Word8) em uma lista de bits, do bit mais significativo ao menos significativo.
+convertByteToBits :: Word8 -> [Int]
+convertByteToBits byte = [if testBit byte i then 1 else 0 | i <- [7, 6 .. 0]]
+
+
+-- | Converte um ByteString em uma matriz de bits, onde cada linha representa os bits de um byte.
 convertBytesToBitMatrix :: BS.ByteString -> [[Int]]
 convertBytesToBitMatrix byteString = map convertByteToBits (BS.unpack byteString)
 
 
-convertByteToBits :: Word8 -> [Int]
-convertByteToBits byte = [if testBit byte j then 1 else 0 | j <- [7, 6 .. 0]]
+-- | Procura um par de registros correspondente ao valor fornecido na lista de tuplas.
+lookupRegisterPair :: (Eq value) => value -> [(regLow, regHigh, value)] -> Maybe (regLow, regHigh)
+lookupRegisterPair value registerPairs = listToMaybe [(regLow, regHigh) | (regLow, regHigh, v) <- registerPairs, v == value]
 
 
-lookupRegisterPair :: (Eq v) => v -> [(k1, k2, v)] -> Maybe (k1, k2)
-lookupRegisterPair searchValue searchTuple = listToMaybe [(k1, k2) | (k1, k2, v) <- searchTuple, v == searchValue]
-
-
+-- | Procura o modo de endereçamento correspondente aos bits fornecidos na lista de modos.
 lookupAddressMode :: [(String, [Int])] -> [Int] -> String
-lookupAddressMode addressModes bits = maybe "err" fst (find (\(_, b) -> b == bits) addressModes)
+lookupAddressMode addressModes bits = maybe "err" fst (find (\(_, modeBits) -> modeBits == bits) addressModes)
 
 
-matchInstruction :: [Int] -> Instruction -> Bool
-matchInstruction bits (Instruction _ pattern _) =
-    and $ zipWith matchBit bits pattern
+-- | Verifica se a lista de bits corresponde ao padrão da instrução
+findInstruction :: [Int] -> Instruction -> Bool
+findInstruction bits (Instruction _ pattern _) =
+    and (zipWith matchBit bits pattern)
     where
-        matchBit bit (Just p) = bit == p
+        matchBit bit (Just target) = bit == target
         matchBit _ Nothing = True
 
 
-convertBitsToByte :: [Int] -> Int
-convertBitsToByte = foldl (\acc b -> acc * 2 + b) 0
-
-
+-- | Converte uma lista de bits em um deslocamento, tratando o bit mais significativo como sinal quando há 8 bits.
 convertDisplacement :: [Int] -> Int
 convertDisplacement bits =
     let
-        value = foldl (\acc b -> acc * 2 + b) 0 bits
+        value = convertBitsToByte bits
     in
         if length bits == 8 && testBit value 7
             then value - 256
             else value
 
 
+-- | Decodifica uma instrução 'mov' que envolve registros e modos de endereçamento.
 handleMovInstruction :: [[Int]] -> [(String, String, [Int])] -> [(String, [Int])] -> (String, String, Int)
-handleMovInstruction bytes registers addressModes =
+handleMovInstruction bytes registers modes =
     let
         firstByte = bytes !! 0
-        d = firstByte !! 6
-        w = firstByte !! 7
+        -- Obtém o bit 'd', que indica a direção da transferência (0 para destino na memória, 1 para destino no registrador).
+        dField = firstByte !! 6
+        -- Obtém o bit 'w', que indica o tamanho do valor (0 para 8 bits, 1 para 16 bits).
+        wField = firstByte !! 7
+
         secondByte = bytes !! 1
         modField = take 2 secondByte
         regField = take 3 (drop 2 secondByte)
         rmField = take 3 (drop 5 secondByte)
 
-        regName regBits = maybe "err" (if w == 0 then fst else snd) (lookupRegisterPair regBits registers)
+        -- Obtém o nome do registro de acordo com os bits e o valor de 'wField'.
+        regName regBits = maybe "err" (if wField == 0 then fst else snd) (lookupRegisterPair regBits registers)
 
-        (source, destination, instrLength) =
+        (source, destination, size) =
+            -- Caso modField seja [1, 1], ambos os operandos são registradores.
             if modField == [1, 1]
                 then
                     let
                         regOperand = regName regField
                         rmOperand = regName rmField
                     in
-                        if d == 0
+                        if dField == 0
+                            -- Se 'dField' for 0, 'rmOperand' é a origem e 'regOperand' é o destino.
                             then (rmOperand, regOperand, 2)
+                            -- Caso contrário, 'regOperand' é a origem e 'rmOperand' é o destino.
                             else (regOperand, rmOperand, 2)
                 else
                     let
-                        baseAddress = lookupAddressMode addressModes rmField
+                        -- Procura o modo de endereçamento correspondente aos bits 'rmField'.
+                        baseAddress = lookupAddressMode modes rmField
 
-                        (displacementBits, instrLen) = case modField of
-                            [0, 1] -> (bytes !! 2, 3)
-                            [1, 0] -> (bytes !! 2 ++ bytes !! 3, 4)
-                            _ -> ([], 2)
+                        (displacementBits, instructionSize) =
+                            case modField of
+                                -- Deslocamento de 8 bits.
+                                [0, 1] -> (bytes !! 2, 3)
+                                -- Deslocamento de 16 bits.
+                                [1, 0] -> (bytes !! 2 ++ bytes !! 3, 4)
+                                -- Sem deslocamento.
+                                _ -> ([], 2)
+
+                        -- Converte o deslocamento, se houver.
                         displacement = if null displacementBits then 0 else convertDisplacement displacementBits
 
-                        displacementStr
+                        displacementString
                             | displacement > 0 = " + " ++ show displacement
                             | displacement < 0 = " - " ++ show (abs displacement)
                             | otherwise = ""
 
-                        address = "[" ++ baseAddress ++ displacementStr ++ "]"
+                        -- Monta o endereço completo incluindo o deslocamento, se houver.
+                        address = "[" ++ baseAddress ++ displacementString ++ "]"
 
                         regOperand = regName regField
                     in
-                        if d == 0
-                            then (address, regOperand, instrLen)
-                            else (regOperand, address, instrLen)
+                        if dField == 0
+                            -- Se 'dField' for 0, o endereço é a origem e o registrador é o destino.
+                            then (address, regOperand, instructionSize)
+                            -- Caso contrário, o registrador é a origem e o endereço é o destino.
+                            else (regOperand, address, instructionSize)
     in
-        (source, destination, instrLength)
+        (source, destination, size)
 
 
-handleMovImmediateInstruction
-    :: [[Int]] -> [(String, String, [Int])] -> [(String, [Int])] -> (String, String, Int)
-handleMovImmediateInstruction bytes registers _addressModes =
+-- | Lida com a instrução 'mov' imediata, onde o valor a ser movido está embutido na própria instrução.
+handleMovImmediateInstruction ::
+    [[Int]] -> [(String, String, [Int])] -> [(String, [Int])] -> (String, String, Int)
+handleMovImmediateInstruction bytes registers _ =
     let
         firstByte = bytes !! 0
-        w = firstByte !! 4 -- Bit `w` de largura
+        wField = firstByte !! 4
+        -- Extrai os três bits do campo de registro, que indicam o registro de destino.
         regBits = take 3 (drop 5 firstByte)
+
         regName =
-            if w == 0
+            -- Determina o nome do registro de destino, considerando registros de 8 bits se 'wField' for 0 e 16 bits se 'wField' for 1.
+            if wField == 0
                 then maybe "err" fst (lookupRegisterPair regBits registers)
                 else maybe "err" snd (lookupRegisterPair regBits registers)
+
         immediateValue =
-            if w == 0
+            if wField == 0
+                -- Obtém o valor imediato de 8 bits a ser movido.
                 then show $ convertBitsToByte (bytes !! 1)
+                -- Obtém o valor imediato de 16 bits a ser movido, combinando dois bytes.
                 else show $ convertBitsToByte (bytes !! 1) + (convertBitsToByte (bytes !! 2) `shiftL` 8)
-        instrLength = if w == 0 then 2 else 3
+
+        -- Define o tamanho da instrução, 2 bytes para valores de 8 bits e 3 bytes para valores de 16 bits.
+        instructionSize = if wField == 0 then 2 else 3
     in
-        (regName, immediateValue, instrLength)
+        (regName, immediateValue, instructionSize)
 
 
-processInstructions
-    :: [[Int]] -> [Instruction] -> [(String, String, [Int])] -> [(String, [Int])] -> FilePath -> IO ()
+-- | Processa uma lista de bytes (representados como listas de bits) e escreve as instruções desmontadas em um arquivo de saída.
+processInstructions ::
+    [[Int]] -> [Instruction] -> [(String, String, [Int])] -> [(String, [Int])] -> FilePath -> IO ()
 processInstructions [] _ _ _ _ = return ()
-processInstructions bytes instructions registers addressModes filePath = do
+processInstructions bytes instructions registers address filePath = do
     let
         firstByte = bytes !! 0
+
     let
-        matchedInstruction = find (matchInstruction (take 8 firstByte)) instructions
+        -- Tenta encontrar uma instrução que corresponda ao padrão dos bits do primeiro byte.
+        matchedInstruction = find (findInstruction (take 8 firstByte)) instructions
+
     case matchedInstruction of
-        Just instr -> do
+        Just instruction -> do
             let
-                (destination, source, instrLength) = operandHandler instr bytes registers addressModes
+                -- Usa a função 'operand' da instrução para interpretar os operandos (destino, origem) e determinar o comprimento da instrução.
+                (destination, source, size) = operand instruction bytes registers address
+
             let
-                disassembled = mnemonic instr ++ " " ++ destination ++ ", " ++ source
+                -- Monta a instrução desmontada em formato de texto, incluindo o mnemônico e os operandos.
+                disassembled = mnemonic instruction ++ " " ++ destination ++ ", " ++ source
+
             appendFile filePath (disassembled ++ "\n")
-            processInstructions (drop instrLength bytes) instructions registers addressModes filePath
+            processInstructions (drop size bytes) instructions registers address filePath
         Nothing -> do
-            appendFile filePath "Unknown Instruction\n"
-            processInstructions (tail bytes) instructions registers addressModes filePath
+            appendFile filePath "err\n"
+            processInstructions (tail bytes) instructions registers address filePath
 
 
 main :: IO ()
